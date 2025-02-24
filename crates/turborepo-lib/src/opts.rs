@@ -1,6 +1,7 @@
 use std::backtrace;
 
 use camino::Utf8PathBuf;
+use serde::Serialize;
 use thiserror::Error;
 use turbopath::{AbsoluteSystemPath, AbsoluteSystemPathBuf, AnchoredSystemPathBuf};
 use turborepo_api_client::APIAuth;
@@ -43,7 +44,7 @@ pub enum Error {
     Config(#[from] crate::config::Error),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct APIClientOpts {
     pub api_url: String,
     pub timeout: u64,
@@ -55,7 +56,7 @@ pub struct APIClientOpts {
     pub preflight: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RepoOpts {
     pub root_turbo_json_path: AbsoluteSystemPathBuf,
     pub allow_no_package_manager: bool,
@@ -65,7 +66,7 @@ pub struct RepoOpts {
 /// The fully resolved options for Turborepo. This is the combination of config,
 /// including all the layers (env, args, defaults, etc.), and the command line
 /// arguments.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Opts {
     pub repo_opts: RepoOpts,
     pub api_client_opts: APIClientOpts,
@@ -135,6 +136,7 @@ impl Opts {
                 run_args,
                 execution_args,
             }) => (execution_args, run_args),
+            Some(Command::Watch { execution_args, .. }) => (execution_args, &Box::default()),
             Some(Command::Ls {
                 affected, filter, ..
             }) => {
@@ -191,7 +193,7 @@ struct OptsInputs<'a> {
     api_auth: &'a Option<APIAuth>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct RunCacheOpts {
     pub(crate) task_output_logs_override: Option<OutputLogsMode>,
 }
@@ -204,7 +206,7 @@ impl<'a> From<OptsInputs<'a>> for RunCacheOpts {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct RunOpts {
     pub(crate) tasks: Vec<String>,
     pub(crate) concurrency: u32,
@@ -224,7 +226,6 @@ pub struct RunOpts {
     pub log_prefix: ResolvedLogPrefix,
     pub log_order: ResolvedLogOrder,
     pub summarize: bool,
-    pub(crate) experimental_space_id: Option<String>,
     pub is_github_actions: bool,
     pub ui_mode: UIMode,
 }
@@ -261,19 +262,19 @@ impl<'a> TaskArgs<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub enum GraphOpts {
     Stdout,
     File(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum ResolvedLogOrder {
     Stream,
     Grouped,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub enum ResolvedLogPrefix {
     Task,
     None,
@@ -340,11 +341,6 @@ impl<'a> TryFrom<OptsInputs<'a>> for RunOpts {
             log_prefix,
             log_order,
             summarize: inputs.config.run_summary(),
-            experimental_space_id: inputs
-                .run_args
-                .experimental_space_id
-                .clone()
-                .or(inputs.config.spaces_id().map(|s| s.to_owned())),
             framework_inference: inputs.execution_args.framework_inference,
             concurrency,
             parallel: inputs.run_args.parallel,
@@ -395,7 +391,7 @@ impl From<LogPrefix> for ResolvedLogPrefix {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ScopeOpts {
     pub pkg_inference_root: Option<AnchoredSystemPathBuf>,
     pub global_deps: Vec<String>,
@@ -537,6 +533,9 @@ impl ScopeOpts {
 
 #[cfg(test)]
 mod test {
+    use clap::Parser;
+    use itertools::Itertools;
+    use serde_json::json;
     use tempfile::TempDir;
     use test_case::test_case;
     use turbopath::AbsoluteSystemPathBuf;
@@ -661,7 +660,6 @@ mod test {
             log_prefix: crate::opts::ResolvedLogPrefix::Task,
             log_order: crate::opts::ResolvedLogOrder::Stream,
             summarize: false,
-            experimental_space_id: None,
             is_github_actions: false,
             daemon: None,
         };
@@ -822,6 +820,38 @@ mod test {
                     write: true
                 }
             }
+        );
+
+        Ok(())
+    }
+
+    #[test_case(
+        vec!["turbo", "watch", "build"];
+        "watch"
+    )]
+    #[test_case(
+        vec!["turbo", "run", "build"];
+        "run"
+    )]
+    #[test_case(
+        vec!["turbo", "ls", "--filter", "foo"];
+        "ls"
+    )]
+    #[test_case(
+        vec!["turbo", "boundaries", "--filter", "foo"];
+        "boundaries"
+    )]
+    fn test_derive_opts_from_args(args_str: Vec<&str>) -> Result<(), anyhow::Error> {
+        let args = Args::try_parse_from(&args_str)?;
+        let opts = Opts::new(
+            &AbsoluteSystemPathBuf::default(),
+            &args,
+            ConfigurationOptions::default(),
+        )?;
+
+        insta::assert_json_snapshot!(
+            args_str.iter().join("_"),
+            json!({ "tasks": opts.run_opts.tasks, "filter_patterns": opts.scope_opts.filter_patterns  })
         );
 
         Ok(())
